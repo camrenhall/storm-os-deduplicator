@@ -81,16 +81,29 @@ async def prune_raw_table(conn: asyncpg.Connection) -> int:
 
 
 async def upsert_unique_pixels(conn: asyncpg.Connection) -> tuple[int, int]:
-    """UPSERT from flood_pixels_raw to flood_pixels_unique."""
+    """
+    UPSERT from flood_pixels_raw to flood_pixels_unique.
+    Only updates existing records if new score is higher.
     
-    # Get counts to calculate metrics
+    Returns:
+        Tuple of (inserts, updates) performed.
+    """
+    # Get counts before
     count_before = await conn.fetchval("SELECT COUNT(*) FROM flood_pixels_unique")
     
-    # Get raw records that would be processed
+    # Store existing records to calculate updates properly
+    existing_segments = await conn.fetch("""
+        SELECT segment_id, score 
+        FROM flood_pixels_unique 
+        WHERE segment_id IN (SELECT segment_id FROM flood_pixels_raw)
+    """)
+    existing_dict = {row['segment_id']: row['score'] for row in existing_segments}
+    
+    # Get raw records that will be processed
     raw_records = await conn.fetch("SELECT segment_id, score FROM flood_pixels_raw")
     
-    # Perform the UPSERT with the critical WHERE clause
-    result = await conn.execute("""
+    # Perform the UPSERT
+    await conn.execute("""
         INSERT INTO flood_pixels_unique AS u (segment_id, score, homes, qpe_1h, ffw,
                                               geom, first_seen, updated_at)
         SELECT segment_id, score, homes, qpe_1h, ffw, geom, first_seen, now()
@@ -102,19 +115,15 @@ async def upsert_unique_pixels(conn: asyncpg.Connection) -> tuple[int, int]:
           WHERE EXCLUDED.score > u.score
     """)
     
+    # Calculate metrics
     count_after = await conn.fetchval("SELECT COUNT(*) FROM flood_pixels_unique")
-    
-    # Calculate actual inserts and updates
     inserts = count_after - count_before
     
-    # Count how many raw records had higher scores than existing unique records
+    # Count actual updates (raw records with higher scores than existing)
     updates = 0
     for raw_record in raw_records:
-        existing = await conn.fetchval(
-            "SELECT score FROM flood_pixels_unique WHERE segment_id = $1", 
-            raw_record['segment_id']
-        )
-        if existing is not None and raw_record['score'] > existing:
+        segment_id = raw_record['segment_id']
+        if segment_id in existing_dict and raw_record['score'] > existing_dict[segment_id]:
             updates += 1
     
     return inserts, updates
