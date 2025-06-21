@@ -162,16 +162,16 @@ async def test_advisory_lock(db_connection):
 async def test_prune_raw_table(db_connection):
     """Test pruning of old records from flood_pixels_raw."""
     conn = db_connection
-    base_time = datetime.now(timezone.utc)
     
-    # Insert mix of old and new records with clear time boundaries
-    old_time = base_time - timedelta(hours=5)     # 5 hours ago (definitely old)
-    recent_time = base_time - timedelta(minutes=30)  # 30 minutes ago (definitely recent)
+    # Use much clearer time boundaries to avoid edge cases
+    now = datetime.now(timezone.utc)
+    very_old_time = now - timedelta(hours=6)    # 6 hours ago (definitely old)
+    very_recent_time = now - timedelta(minutes=10)  # 10 minutes ago (definitely recent)
     
     # Insert old records
-    await insert_test_data(conn, 5, old_time)
+    await insert_test_data(conn, 5, very_old_time)
     # Insert recent records  
-    await insert_test_data(conn, 3, recent_time)
+    await insert_test_data(conn, 3, very_recent_time)
     
     # Verify we have 8 total records
     count_before = await conn.fetchval("SELECT COUNT(*) FROM flood_pixels_raw")
