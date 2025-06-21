@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 
 import asyncpg
 import pytest
+import pytest_asyncio
 
 # Import the functions we want to test
 from dedup import (
@@ -33,7 +34,7 @@ from dedup import (
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL", "postgresql://postgres:password@localhost:5432/flood_test")
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def db_connection():
     """Provide a test database connection with clean tables."""
     try:
