@@ -25,7 +25,6 @@ from dedup import (
     prune_raw_table,
     refresh_marketable_view,
     release_advisory_lock,
-    run_deduplication,
     upsert_unique_pixels,
 )
 
@@ -347,66 +346,3 @@ async def test_materialized_view_cleanup(db_connection):
     old_exists = await conn.fetchval("SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = '_old')")
     assert not mv_exists
     assert not old_exists
-
-
-if __name__ == "__main__":
-    # Run tests directly
-    pytest.main([__file__, "-v"])
-    start_time = time.time()
-    
-    # Acquire lock
-    assert await acquire_advisory_lock(conn) is True
-    
-    try:
-        # Run deduplication steps in transaction
-        async with conn.transaction(isolation='serializable'):
-            pruned = await prune_raw_table(conn)
-            inserts, updates = await upsert_unique_pixels(conn)
-            marketable_rows = await refresh_marketable_view(conn)
-        
-        end_time = time.time()
-        duration = end_time - start_time
-        
-        print(f"Deduplication completed in {duration:.1f}s")
-        print(f"Pruned: {pruned}, Inserts: {inserts}, Updates: {updates}, Marketable: {marketable_rows}")
-        
-        # Should complete within 30 seconds
-        assert duration < 30.0, f"Deduplication took {duration:.1f}s, exceeding 30s budget"
-        
-        # Verify we have marketable rows
-        assert marketable_rows > 0, "Should have some marketable rows"
-        assert marketable_rows <= 10, "Should not exceed 10 marketable rows"
-        
-    finally:
-        await release_advisory_lock(conn)
-
-
-@pytest.mark.asyncio 
-async def test_materialized_view_cleanup(db_connection):
-    """Test that materialized view refresh handles leftover tables."""
-    conn = db_connection
-    
-    # Create leftover tables that might exist from previous failed runs
-    await conn.execute("CREATE TABLE IF NOT EXISTS _mv (test_col int)")
-    await conn.execute("CREATE TABLE IF NOT EXISTS _old (test_col int)")
-    
-    # Insert test data into unique table
-    await conn.execute("""
-        INSERT INTO flood_pixels_unique (segment_id, score, homes, qpe_1h, ffw, geom, first_seen, updated_at)
-        VALUES (99999, 75, 350, 20.0, true, ST_GeomFromText('POINT(-95.3698 29.7604)', 4326), now(), now())
-    """)
-    
-    # Should successfully refresh despite leftover tables
-    marketable_count = await refresh_marketable_view(conn)
-    assert marketable_count == 1
-    
-    # Verify leftover tables were cleaned up
-    mv_exists = await conn.fetchval("SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = '_mv')")
-    old_exists = await conn.fetchval("SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = '_old')")
-    assert not mv_exists
-    assert not old_exists
-
-
-if __name__ == "__main__":
-    # Run tests directly
-    pytest.main([__file__, "-v"])
