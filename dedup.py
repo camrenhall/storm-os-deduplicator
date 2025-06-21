@@ -137,10 +137,10 @@ async def refresh_marketable_view(conn: asyncpg.Connection) -> int:
     Returns:
         Number of rows in the new marketable view.
     """
-    # Clean up any leftover tables from previous failed runs
+    # Clean up any leftover tables/views from previous failed runs
     await conn.execute("DROP TABLE IF EXISTS _mv CASCADE")
     await conn.execute("DROP TABLE IF EXISTS _old CASCADE")
-    await conn.execute("DROP MATERIALIZED VIEW IF EXISTS _old CASCADE")  # New line
+    await conn.execute("DROP MATERIALIZED VIEW IF EXISTS _old CASCADE")
     
     # Create new materialized view as temporary table
     await conn.execute("""
@@ -153,19 +153,38 @@ async def refresh_marketable_view(conn: asyncpg.Connection) -> int:
           LIMIT  10
     """)
     
-    # Atomic swap: handle both table and materialized view cases
-    try:
-        # Try as table first (for future runs)
-        await conn.execute("ALTER TABLE flood_pixels_marketable RENAME TO _old")
-    except asyncpg.exceptions.WrongObjectTypeError:
-        # It's a materialized view, handle differently
-        await conn.execute("DROP MATERIALIZED VIEW flood_pixels_marketable")
+    # Check what type of object flood_pixels_marketable is
+    object_type = await conn.fetchval("""
+        SELECT 
+            CASE 
+                WHEN c.relkind = 'r' THEN 'table'
+                WHEN c.relkind = 'm' THEN 'materialized_view'
+                ELSE 'unknown'
+            END as object_type
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relname = 'flood_pixels_marketable'
+        AND n.nspname = 'public'
+    """)
     
+    logger.info(f"flood_pixels_marketable is a {object_type}")
+    
+    # Handle the swap based on object type
+    if object_type == 'materialized_view':
+        logger.info("Dropping existing materialized view")
+        await conn.execute("DROP MATERIALIZED VIEW flood_pixels_marketable")
+    elif object_type == 'table':
+        logger.info("Renaming existing table to _old")
+        await conn.execute("ALTER TABLE flood_pixels_marketable RENAME TO _old")
+    else:
+        # Object doesn't exist, which is fine for first run
+        logger.info("flood_pixels_marketable doesn't exist, will create new")
+    
+    # Rename new table to target name
     await conn.execute("ALTER TABLE _mv RENAME TO flood_pixels_marketable")
     
-    # Clean up (handle both cases)
+    # Clean up old table if it exists
     await conn.execute("DROP TABLE IF EXISTS _old CASCADE")
-    await conn.execute("DROP MATERIALIZED VIEW IF EXISTS _old CASCADE")
     
     # Return count of marketable rows
     return await conn.fetchval("SELECT COUNT(*) FROM flood_pixels_marketable")
