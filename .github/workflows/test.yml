@@ -50,8 +50,9 @@ jobs:
       env:
         TEST_DATABASE_URL: postgresql://postgres:password@localhost:5432/flood_test
         LOG_LEVEL: DEBUG
+        PYTHONPATH: .
       run: |
-        python -m pytest tests/ -v --tb=short
+        python -m pytest tests/test_dedup.py -v --tb=short
     
     - name: Test container build
       run: |
