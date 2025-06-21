@@ -81,18 +81,16 @@ async def prune_raw_table(conn: asyncpg.Connection) -> int:
 
 
 async def upsert_unique_pixels(conn: asyncpg.Connection) -> tuple[int, int]:
-    """
-    UPSERT from flood_pixels_raw to flood_pixels_unique.
-    Only updates existing records if new score is higher.
+    """UPSERT from flood_pixels_raw to flood_pixels_unique."""
     
-    Returns:
-        Tuple of (inserts, updates) performed.
-    """
-    # Get counts before and after to calculate inserts vs updates
+    # Get counts to calculate metrics
     count_before = await conn.fetchval("SELECT COUNT(*) FROM flood_pixels_unique")
     
-    # Perform the UPSERT
-    await conn.execute("""
+    # Get raw records that would be processed
+    raw_records = await conn.fetch("SELECT segment_id, score FROM flood_pixels_raw")
+    
+    # Perform the UPSERT with the critical WHERE clause
+    result = await conn.execute("""
         INSERT INTO flood_pixels_unique AS u (segment_id, score, homes, qpe_1h, ffw,
                                               geom, first_seen, updated_at)
         SELECT segment_id, score, homes, qpe_1h, ffw, geom, first_seen, now()
@@ -105,15 +103,21 @@ async def upsert_unique_pixels(conn: asyncpg.Connection) -> tuple[int, int]:
     """)
     
     count_after = await conn.fetchval("SELECT COUNT(*) FROM flood_pixels_unique")
-    raw_count = await conn.fetchval("SELECT COUNT(*) FROM flood_pixels_raw")
     
-    # Calculate inserts and updates
-    # Inserts = new unique records
-    # Updates = raw records that had higher scores than existing unique records
+    # Calculate actual inserts and updates
     inserts = count_after - count_before
-    updates = raw_count - inserts
     
-    return inserts, max(0, updates)
+    # Count how many raw records had higher scores than existing unique records
+    updates = 0
+    for raw_record in raw_records:
+        existing = await conn.fetchval(
+            "SELECT score FROM flood_pixels_unique WHERE segment_id = $1", 
+            raw_record['segment_id']
+        )
+        if existing is not None and raw_record['score'] > existing:
+            updates += 1
+    
+    return inserts, updates
 
 
 async def refresh_marketable_view(conn: asyncpg.Connection) -> int:

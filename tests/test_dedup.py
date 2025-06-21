@@ -164,13 +164,13 @@ async def test_prune_raw_table(db_connection):
     conn = db_connection
     base_time = datetime.now(timezone.utc)
     
-    # Insert mix of old and new records
-    old_time = base_time - timedelta(hours=4)  # 4 hours ago (should be pruned)
-    recent_time = base_time - timedelta(hours=1)  # 1 hour ago (should remain)
+    # Insert mix of old and new records with clear time boundaries
+    old_time = base_time - timedelta(hours=5)     # 5 hours ago (definitely old)
+    recent_time = base_time - timedelta(minutes=30)  # 30 minutes ago (definitely recent)
     
     # Insert old records
     await insert_test_data(conn, 5, old_time)
-    # Insert recent records
+    # Insert recent records  
     await insert_test_data(conn, 3, recent_time)
     
     # Verify we have 8 total records
