@@ -140,6 +140,7 @@ async def refresh_marketable_view(conn: asyncpg.Connection) -> int:
     # Clean up any leftover tables from previous failed runs
     await conn.execute("DROP TABLE IF EXISTS _mv CASCADE")
     await conn.execute("DROP TABLE IF EXISTS _old CASCADE")
+    await conn.execute("DROP MATERIALIZED VIEW IF EXISTS _old CASCADE")  # New line
     
     # Create new materialized view as temporary table
     await conn.execute("""
@@ -152,10 +153,19 @@ async def refresh_marketable_view(conn: asyncpg.Connection) -> int:
           LIMIT  10
     """)
     
-    # Atomic swap: rename existing view to _old, new table to view name
-    await conn.execute("ALTER TABLE flood_pixels_marketable RENAME TO _old")
+    # Atomic swap: handle both table and materialized view cases
+    try:
+        # Try as table first (for future runs)
+        await conn.execute("ALTER TABLE flood_pixels_marketable RENAME TO _old")
+    except asyncpg.exceptions.WrongObjectTypeError:
+        # It's a materialized view, handle differently
+        await conn.execute("DROP MATERIALIZED VIEW flood_pixels_marketable")
+    
     await conn.execute("ALTER TABLE _mv RENAME TO flood_pixels_marketable")
-    await conn.execute("DROP TABLE _old")
+    
+    # Clean up (handle both cases)
+    await conn.execute("DROP TABLE IF EXISTS _old CASCADE")
+    await conn.execute("DROP MATERIALIZED VIEW IF EXISTS _old CASCADE")
     
     # Return count of marketable rows
     return await conn.fetchval("SELECT COUNT(*) FROM flood_pixels_marketable")
