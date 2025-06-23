@@ -23,7 +23,7 @@ import pytest_asyncio
 # Import the functions we want to test
 from dedup import (
     acquire_advisory_lock,
-    prune_raw_table,
+    prune_raw_table_if_configured,
     refresh_marketable_view,
     release_advisory_lock,
     upsert_unique_pixels,
@@ -159,9 +159,12 @@ async def test_advisory_lock(db_connection):
 
 
 @pytest.mark.asyncio
-async def test_prune_raw_table(db_connection):
-    """Test pruning of old records from flood_pixels_raw."""
+async def test_prune_raw_table_with_retention_configured(db_connection, monkeypatch):
+    """Test pruning of old records from flood_pixels_raw when retention is configured."""
     conn = db_connection
+    
+    # Set retention to 3 hours for this test
+    monkeypatch.setenv("RAW_RETENTION_HOURS", "3")
     
     # Use much clearer time boundaries to avoid edge cases
     now = datetime.now(timezone.utc)
@@ -178,7 +181,7 @@ async def test_prune_raw_table(db_connection):
     assert count_before == 8
     
     # Prune old records
-    pruned_count = await prune_raw_table(conn)
+    pruned_count = await prune_raw_table_if_configured(conn)
     
     # Should have pruned the 5 old records
     assert pruned_count == 5
@@ -186,6 +189,39 @@ async def test_prune_raw_table(db_connection):
     # Should have 3 records remaining
     count_after = await conn.fetchval("SELECT COUNT(*) FROM flood_pixels_raw")
     assert count_after == 3
+
+
+@pytest.mark.asyncio
+async def test_prune_raw_table_without_retention_configured(db_connection, monkeypatch):
+    """Test that no pruning occurs when retention is not configured."""
+    conn = db_connection
+    
+    # Ensure RAW_RETENTION_HOURS is not set
+    monkeypatch.delenv("RAW_RETENTION_HOURS", raising=False)
+    
+    # Use much clearer time boundaries to avoid edge cases
+    now = datetime.now(timezone.utc)
+    very_old_time = now - timedelta(hours=6)    # 6 hours ago (definitely old)
+    very_recent_time = now - timedelta(minutes=10)  # 10 minutes ago (definitely recent)
+    
+    # Insert old records
+    await insert_test_data(conn, 5, very_old_time)
+    # Insert recent records  
+    await insert_test_data(conn, 3, very_recent_time)
+    
+    # Verify we have 8 total records
+    count_before = await conn.fetchval("SELECT COUNT(*) FROM flood_pixels_raw")
+    assert count_before == 8
+    
+    # Attempt to prune - should not delete anything
+    pruned_count = await prune_raw_table_if_configured(conn)
+    
+    # Should have pruned 0 records (append-only mode)
+    assert pruned_count == 0
+    
+    # Should still have all 8 records
+    count_after = await conn.fetchval("SELECT COUNT(*) FROM flood_pixels_raw")
+    assert count_after == 8
 
 
 @pytest.mark.asyncio
@@ -267,9 +303,12 @@ async def test_mv_row_limit(db_connection):
 
 
 @pytest.mark.asyncio
-async def test_latency_budget(db_connection):
+async def test_latency_budget(db_connection, monkeypatch):
     """Test that processing 10,000 synthetic rows completes within 30 seconds."""
     conn = db_connection
+    
+    # Set retention to avoid pruning during this performance test
+    monkeypatch.setenv("RAW_RETENTION_HOURS", "24")
     
     # Insert 10,000 synthetic raw rows
     print("Inserting 10,000 test records...")
@@ -302,7 +341,7 @@ async def test_latency_budget(db_connection):
     try:
         # Run deduplication steps in transaction
         async with conn.transaction(isolation='serializable'):
-            pruned = await prune_raw_table(conn)
+            pruned = await prune_raw_table_if_configured(conn)
             inserts, updates = await upsert_unique_pixels(conn)
             marketable_rows = await refresh_marketable_view(conn)
         
