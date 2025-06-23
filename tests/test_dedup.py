@@ -166,29 +166,62 @@ async def test_prune_raw_table_with_retention_configured(db_connection, monkeypa
     # Set retention to 3 hours for this test
     monkeypatch.setenv("RAW_RETENTION_HOURS", "3")
     
+    # Clean the table completely to avoid interference from other tests
+    await conn.execute("TRUNCATE flood_pixels_raw, flood_pixels_unique")
+    
     # Use much clearer time boundaries to avoid edge cases
     now = datetime.now(timezone.utc)
     very_old_time = now - timedelta(hours=6)    # 6 hours ago (definitely old)
     very_recent_time = now - timedelta(minutes=10)  # 10 minutes ago (definitely recent)
     
-    # Insert old records
-    await insert_test_data(conn, 5, very_old_time)
-    # Insert recent records  
-    await insert_test_data(conn, 3, very_recent_time)
+    # Insert specific test data with known segment_ids
+    old_data = []
+    recent_data = []
     
-    # Verify we have 8 total records
+    # Insert 5 old records
+    for i in range(5):
+        segment_id = 9000 + i  # Use specific range to avoid conflicts
+        old_data.append((segment_id, 50, 100, 15.0, False, f'POINT(-95.{3700+i} 29.7604)', very_old_time))
+    
+    # Insert 3 recent records  
+    for i in range(3):
+        segment_id = 9010 + i  # Use different range
+        recent_data.append((segment_id, 60, 200, 20.0, True, f'POINT(-95.{3710+i} 29.7604)', very_recent_time))
+    
+    # Insert all test data
+    all_data = old_data + recent_data
+    await conn.executemany(
+        """
+        INSERT INTO flood_pixels_raw (segment_id, score, homes, qpe_1h, ffw, geom, first_seen)
+        VALUES ($1, $2, $3, $4, $5, ST_GeomFromText($6, 4326), $7)
+        """,
+        all_data
+    )
+    
+    # Verify we have exactly 8 total records
     count_before = await conn.fetchval("SELECT COUNT(*) FROM flood_pixels_raw")
-    assert count_before == 8
+    assert count_before == 8, f"Expected 8 records before pruning, got {count_before}"
     
     # Prune old records
     pruned_count = await prune_raw_table_if_configured(conn)
     
-    # Should have pruned the 5 old records
-    assert pruned_count == 5
+    # Should have pruned exactly the 5 old records
+    assert pruned_count == 5, f"Expected 5 records pruned, got {pruned_count}"
     
-    # Should have 3 records remaining
+    # Should have exactly 3 records remaining
     count_after = await conn.fetchval("SELECT COUNT(*) FROM flood_pixels_raw")
-    assert count_after == 3
+    assert count_after == 3, f"Expected 3 records after pruning, got {count_after}"
+    
+    # Verify that only recent records remain
+    old_remaining = await conn.fetchval(
+        "SELECT COUNT(*) FROM flood_pixels_raw WHERE segment_id BETWEEN 9000 AND 9004"
+    )
+    recent_remaining = await conn.fetchval(
+        "SELECT COUNT(*) FROM flood_pixels_raw WHERE segment_id BETWEEN 9010 AND 9012"
+    )
+    
+    assert old_remaining == 0, "No old records should remain"
+    assert recent_remaining == 3, "All recent records should remain"
 
 
 @pytest.mark.asyncio
