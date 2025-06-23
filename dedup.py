@@ -2,8 +2,9 @@
 """
 Flood-Lead Intelligence - Deduplicator (Container 2)
 
-Prunes flood_pixels_raw to 3-hour window, deduplicates to flood_pixels_unique,
+Deduplicates flood_pixels_raw to flood_pixels_unique,
 and refreshes flood_pixels_marketable materialized view.
+Raw table is now append-only by default.
 """
 
 import asyncio
@@ -66,18 +67,48 @@ async def release_advisory_lock(conn: asyncpg.Connection):
     await conn.execute("SELECT pg_advisory_unlock($1)", ADVISORY_LOCK_ID)
 
 
-async def prune_raw_table(conn: asyncpg.Connection) -> int:
+async def prune_raw_table_if_configured(conn: asyncpg.Connection) -> int:
     """
-    Delete records older than 3 hours from flood_pixels_raw.
+    Delete records older than configured retention period from flood_pixels_raw.
+    Only runs if RAW_RETENTION_HOURS environment variable is set and > 0.
     
     Returns:
-        Number of rows deleted.
+        Number of rows deleted (0 if pruning disabled).
     """
-    result = await conn.execute(
-        "DELETE FROM flood_pixels_raw WHERE first_seen < now() - INTERVAL '180 minutes'"
-    )
-    # Extract row count from result string like "DELETE 123"
-    return int(result.split()[-1]) if result.split()[-1].isdigit() else 0
+    raw_retention_hours = os.getenv("RAW_RETENTION_HOURS")
+    
+    # Skip pruning if not configured or set to None/empty
+    if not raw_retention_hours:
+        logger.info("RAW_RETENTION_HOURS not set - skipping raw table pruning (append-only mode)")
+        return 0
+    
+    try:
+        retention_hours = float(raw_retention_hours)
+        if retention_hours <= 0:
+            logger.info("RAW_RETENTION_HOURS <= 0 - skipping raw table pruning (append-only mode)")
+            return 0
+    except (ValueError, TypeError):
+        logger.warning(f"Invalid RAW_RETENTION_HOURS value '{raw_retention_hours}' - skipping pruning")
+        return 0
+    
+    logger.info(f"RAW_RETENTION_HOURS={retention_hours} - pruning old records")
+    
+    try:
+        result = await conn.execute(
+            "DELETE FROM flood_pixels_raw WHERE first_seen < now() - INTERVAL '%s hours'",
+            retention_hours
+        )
+        # Extract row count from result string like "DELETE 123"
+        rows_deleted = int(result.split()[-1]) if result.split()[-1].isdigit() else 0
+        logger.info(f"Pruned {rows_deleted} records older than {retention_hours} hours")
+        return rows_deleted
+    except asyncpg.exceptions.InsufficientPrivilegeError:
+        logger.warning("No DELETE privilege on flood_pixels_raw - continuing in append-only mode")
+        return 0
+    except Exception as e:
+        logger.error(f"Failed to prune raw table: {e}")
+        # Don't fail the entire process if pruning fails
+        return 0
 
 
 async def upsert_unique_pixels(conn: asyncpg.Connection) -> tuple[int, int]:
@@ -211,10 +242,13 @@ async def run_deduplication():
         
         # Execute all operations in a single serializable transaction
         async with conn.transaction(isolation='serializable'):
-            # 1. Prune old records
-            logger.info("Pruning old records from flood_pixels_raw")
-            metrics.raw_pruned_rows = await prune_raw_table(conn)
-            logger.info(f"Pruned {metrics.raw_pruned_rows} old records")
+            # 1. Conditionally prune old records (only if configured)
+            logger.info("Checking if raw table pruning is configured")
+            metrics.raw_pruned_rows = await prune_raw_table_if_configured(conn)
+            if metrics.raw_pruned_rows > 0:
+                logger.info(f"Pruned {metrics.raw_pruned_rows} old records")
+            else:
+                logger.info("No records pruned - raw table operating in append-only mode")
             
             # 2. UPSERT to unique table
             logger.info("Upserting to flood_pixels_unique")
