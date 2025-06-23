@@ -386,3 +386,123 @@ async def test_materialized_view_cleanup(db_connection):
     old_exists = await conn.fetchval("SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = '_old')")
     assert not mv_exists
     assert not old_exists
+
+
+# FL-134: Tests for append-only raw table behavior
+@pytest.mark.asyncio
+async def test_dedup_does_not_delete_raw(db_connection, monkeypatch):
+    """Test that deduplication runs without deleting raw records when RAW_RETENTION_HOURS is not set."""
+    from dedup import run_deduplication
+    
+    conn = db_connection
+    
+    # Ensure RAW_RETENTION_HOURS is not set
+    monkeypatch.delenv("RAW_RETENTION_HOURS", raising=False)
+    
+    # Clean up any existing test data
+    await conn.execute("DELETE FROM flood_pixels_raw WHERE segment_id IN (1, 2)")
+    await conn.execute("DELETE FROM flood_pixels_unique WHERE segment_id IN (1, 2)")
+    
+    # Insert test data - one recent, one 4h old
+    await conn.execute(
+        "INSERT INTO flood_pixels_raw (segment_id, score, homes, qpe_1h, ffw, geom, first_seen) "
+        "VALUES (1, 10, 0, 0, false, ST_SetSRID(ST_MakePoint(0,0), 4326), now() - INTERVAL '4 hours'), "
+        "       (2, 10, 0, 0, false, ST_SetSRID(ST_MakePoint(0,0), 4326), now())"
+    )
+    
+    # Run deduplication
+    await run_deduplication()
+    
+    # Verify both records still exist in raw table
+    rows = await conn.fetchval("SELECT COUNT(*) FROM flood_pixels_raw WHERE segment_id IN (1, 2)")
+    assert rows == 2, "Raw table must remain append-only - both old and new records should be preserved"
+
+
+@pytest.mark.asyncio
+async def test_dedup_prunes_when_retention_configured(db_connection, monkeypatch):
+    """Test that deduplication prunes old records when RAW_RETENTION_HOURS is explicitly set."""
+    from dedup import run_deduplication
+    
+    conn = db_connection
+    
+    # Set retention to 2 hours
+    monkeypatch.setenv("RAW_RETENTION_HOURS", "2")
+    
+    # Clean up any existing test data
+    await conn.execute("DELETE FROM flood_pixels_raw WHERE segment_id IN (3, 4)")
+    await conn.execute("DELETE FROM flood_pixels_unique WHERE segment_id IN (3, 4)")
+    
+    # Insert test data - one recent, one 4h old
+    await conn.execute(
+        "INSERT INTO flood_pixels_raw (segment_id, score, homes, qpe_1h, ffw, geom, first_seen) "
+        "VALUES (3, 10, 0, 0, false, ST_SetSRID(ST_MakePoint(0,0), 4326), now() - INTERVAL '4 hours'), "
+        "       (4, 10, 0, 0, false, ST_SetSRID(ST_MakePoint(0,0), 4326), now())"
+    )
+    
+    # Run deduplication
+    await run_deduplication()
+    
+    # Verify only the recent record remains
+    total_rows = await conn.fetchval("SELECT COUNT(*) FROM flood_pixels_raw WHERE segment_id IN (3, 4)")
+    recent_rows = await conn.fetchval("SELECT COUNT(*) FROM flood_pixels_raw WHERE segment_id = 4")
+    
+    assert total_rows == 1, "Only recent record should remain when retention is configured"
+    assert recent_rows == 1, "Recent record should be preserved"
+
+
+@pytest.mark.asyncio
+async def test_dedup_handles_invalid_retention_config(db_connection, monkeypatch):
+    """Test that deduplication handles invalid RAW_RETENTION_HOURS gracefully."""
+    from dedup import run_deduplication
+    
+    conn = db_connection
+    
+    # Set invalid retention value
+    monkeypatch.setenv("RAW_RETENTION_HOURS", "invalid")
+    
+    # Clean up any existing test data
+    await conn.execute("DELETE FROM flood_pixels_raw WHERE segment_id IN (5, 6)")
+    await conn.execute("DELETE FROM flood_pixels_unique WHERE segment_id IN (5, 6)")
+    
+    # Insert test data
+    await conn.execute(
+        "INSERT INTO flood_pixels_raw (segment_id, score, homes, qpe_1h, ffw, geom, first_seen) "
+        "VALUES (5, 10, 0, 0, false, ST_SetSRID(ST_MakePoint(0,0), 4326), now() - INTERVAL '4 hours'), "
+        "       (6, 10, 0, 0, false, ST_SetSRID(ST_MakePoint(0,0), 4326), now())"
+    )
+    
+    # Run deduplication - should not raise exception
+    await run_deduplication()
+    
+    # Verify both records still exist (fallback to append-only)
+    rows = await conn.fetchval("SELECT COUNT(*) FROM flood_pixels_raw WHERE segment_id IN (5, 6)")
+    assert rows == 2, "Invalid retention config should fallback to append-only mode"
+
+
+@pytest.mark.asyncio
+async def test_dedup_handles_zero_retention_config(db_connection, monkeypatch):
+    """Test that deduplication treats zero retention as disabled."""
+    from dedup import run_deduplication
+    
+    conn = db_connection
+    
+    # Set retention to 0 (disabled)
+    monkeypatch.setenv("RAW_RETENTION_HOURS", "0")
+    
+    # Clean up any existing test data
+    await conn.execute("DELETE FROM flood_pixels_raw WHERE segment_id IN (7, 8)")
+    await conn.execute("DELETE FROM flood_pixels_unique WHERE segment_id IN (7, 8)")
+    
+    # Insert test data
+    await conn.execute(
+        "INSERT INTO flood_pixels_raw (segment_id, score, homes, qpe_1h, ffw, geom, first_seen) "
+        "VALUES (7, 10, 0, 0, false, ST_SetSRID(ST_MakePoint(0,0), 4326), now() - INTERVAL '4 hours'), "
+        "       (8, 10, 0, 0, false, ST_SetSRID(ST_MakePoint(0,0), 4326), now())"
+    )
+    
+    # Run deduplication
+    await run_deduplication()
+    
+    # Verify both records still exist
+    rows = await conn.fetchval("SELECT COUNT(*) FROM flood_pixels_raw WHERE segment_id IN (7, 8)")
+    assert rows == 2, "Zero retention should be treated as disabled (append-only mode)"
