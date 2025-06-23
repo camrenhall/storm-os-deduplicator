@@ -95,8 +95,7 @@ async def prune_raw_table_if_configured(conn: asyncpg.Connection) -> int:
     
     try:
         result = await conn.execute(
-            "DELETE FROM flood_pixels_raw WHERE first_seen < now() - INTERVAL '%s hours'",
-            retention_hours
+            f"DELETE FROM flood_pixels_raw WHERE first_seen < now() - INTERVAL '{retention_hours} hours'"
         )
         # Extract row count from result string like "DELETE 123"
         rows_deleted = int(result.split()[-1]) if result.split()[-1].isdigit() else 0

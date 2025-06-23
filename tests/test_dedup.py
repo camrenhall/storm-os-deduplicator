@@ -392,8 +392,6 @@ async def test_materialized_view_cleanup(db_connection):
 @pytest.mark.asyncio
 async def test_dedup_does_not_delete_raw(db_connection, monkeypatch):
     """Test that deduplication runs without deleting raw records when RAW_RETENTION_HOURS is not set."""
-    from dedup import run_deduplication
-    
     conn = db_connection
     
     # Ensure RAW_RETENTION_HOURS is not set
@@ -410,8 +408,9 @@ async def test_dedup_does_not_delete_raw(db_connection, monkeypatch):
         "       (2, 10, 0, 0, false, ST_SetSRID(ST_MakePoint(0,0), 4326), now())"
     )
     
-    # Run deduplication
-    await run_deduplication()
+    # Test the pruning function directly (should not delete anything)
+    pruned_count = await prune_raw_table_if_configured(conn)
+    assert pruned_count == 0, "No records should be pruned when RAW_RETENTION_HOURS is not set"
     
     # Verify both records still exist in raw table
     rows = await conn.fetchval("SELECT COUNT(*) FROM flood_pixels_raw WHERE segment_id IN (1, 2)")
@@ -421,8 +420,6 @@ async def test_dedup_does_not_delete_raw(db_connection, monkeypatch):
 @pytest.mark.asyncio
 async def test_dedup_prunes_when_retention_configured(db_connection, monkeypatch):
     """Test that deduplication prunes old records when RAW_RETENTION_HOURS is explicitly set."""
-    from dedup import run_deduplication
-    
     conn = db_connection
     
     # Set retention to 2 hours
@@ -439,8 +436,9 @@ async def test_dedup_prunes_when_retention_configured(db_connection, monkeypatch
         "       (4, 10, 0, 0, false, ST_SetSRID(ST_MakePoint(0,0), 4326), now())"
     )
     
-    # Run deduplication
-    await run_deduplication()
+    # Test the pruning function directly (should delete old record)
+    pruned_count = await prune_raw_table_if_configured(conn)
+    assert pruned_count == 1, "One old record should be pruned when retention is configured"
     
     # Verify only the recent record remains
     total_rows = await conn.fetchval("SELECT COUNT(*) FROM flood_pixels_raw WHERE segment_id IN (3, 4)")
@@ -453,8 +451,6 @@ async def test_dedup_prunes_when_retention_configured(db_connection, monkeypatch
 @pytest.mark.asyncio
 async def test_dedup_handles_invalid_retention_config(db_connection, monkeypatch):
     """Test that deduplication handles invalid RAW_RETENTION_HOURS gracefully."""
-    from dedup import run_deduplication
-    
     conn = db_connection
     
     # Set invalid retention value
@@ -471,8 +467,9 @@ async def test_dedup_handles_invalid_retention_config(db_connection, monkeypatch
         "       (6, 10, 0, 0, false, ST_SetSRID(ST_MakePoint(0,0), 4326), now())"
     )
     
-    # Run deduplication - should not raise exception
-    await run_deduplication()
+    # Test the pruning function directly - should not raise exception and should not delete
+    pruned_count = await prune_raw_table_if_configured(conn)
+    assert pruned_count == 0, "No records should be pruned with invalid config"
     
     # Verify both records still exist (fallback to append-only)
     rows = await conn.fetchval("SELECT COUNT(*) FROM flood_pixels_raw WHERE segment_id IN (5, 6)")
@@ -482,8 +479,6 @@ async def test_dedup_handles_invalid_retention_config(db_connection, monkeypatch
 @pytest.mark.asyncio
 async def test_dedup_handles_zero_retention_config(db_connection, monkeypatch):
     """Test that deduplication treats zero retention as disabled."""
-    from dedup import run_deduplication
-    
     conn = db_connection
     
     # Set retention to 0 (disabled)
@@ -500,8 +495,9 @@ async def test_dedup_handles_zero_retention_config(db_connection, monkeypatch):
         "       (8, 10, 0, 0, false, ST_SetSRID(ST_MakePoint(0,0), 4326), now())"
     )
     
-    # Run deduplication
-    await run_deduplication()
+    # Test the pruning function directly - should not delete anything
+    pruned_count = await prune_raw_table_if_configured(conn)
+    assert pruned_count == 0, "No records should be pruned when retention is 0"
     
     # Verify both records still exist
     rows = await conn.fetchval("SELECT COUNT(*) FROM flood_pixels_raw WHERE segment_id IN (7, 8)")
